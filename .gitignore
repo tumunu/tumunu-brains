@@ -1,0 +1,61 @@
+# Rust
+target/
+Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# Session and analysis data
+session.json
+*.session
+analysis_results.json
+forensic_report.md
+
+# Test files
+pattern_test.rs
+suspicious_sample.rs
+test_sample.rs
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Documentation builds
+docs/_build/
+docs/build/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Coverage
+*.profraw
+*.profdata
+tarpaulin-report.html
+cobertura.xml
+
+# Benchmarks
+criterion/

@@ -1,0 +1,25 @@
+[package]
+name = "brains-forensics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "AST-based pattern detection for forensic analysis"
+
+[dependencies]
+brains-ontology = { path = "../brains-ontology" }
+brains-detection = { path = "../brains-detection" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tree-sitter.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-javascript.workspace = true
+tree-sitter-python.workspace = true
+md5 = "0.7"
+
+[dev-dependencies]
+proptest.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "brains-provenance"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "LLM provenance fingerprinting for forensic analysis"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

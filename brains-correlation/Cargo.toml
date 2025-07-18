@@ -1,0 +1,23 @@
+[package]
+name = "brains-correlation"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Fragment correlation and intent reconstruction for forensic analysis"
+
+[dependencies]
+brains-ontology = { path = "../brains-ontology" }
+brains-detection = { path = "../brains-detection" }
+brains-forensics = { path = "../brains-forensics" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+hex.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

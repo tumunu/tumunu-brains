@@ -1,0 +1,25 @@
+[package]
+name = "brains-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Core plugin system and APIs for forensic intelligence platform"
+
+[dependencies]
+brains-ontology = { path = "../brains-ontology" }
+brains-detection = { path = "../brains-detection" }
+brains-forensics = { path = "../brains-forensics" }
+brains-correlation = { path = "../brains-correlation" }
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+semver = "1.0"
+libloading = "0.8"
+tempfile = "3.0"
+
+[dev-dependencies]
+proptest.workspace = true
