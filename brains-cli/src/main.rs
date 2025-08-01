@@ -3,7 +3,7 @@
 //! Command-line interface for forensic analysis with investigation session recording.
 
 // Core dependencies
-use std::{fs, path::PathBuf};
+use std::{fs, path::PathBuf, io::Write};
 use anyhow::{anyhow, Context, Result as AnyResult};
 use brains_memory::{MemoryEntry, MemoryStore};
 use rand::Rng;
@@ -241,6 +241,7 @@ struct Investigation {
     session: AnalysisSession,
     detector: BasicLLMDetector,
     fingerprinter: ProvenanceFingerprinter,
+    session_path: PathBuf,
 }
 
 #[tokio::main]
@@ -486,6 +487,7 @@ async fn session_command(cli: Cli, action: SessionAction) -> AnyResult<()> {
                 session,
                 detector: BasicLLMDetector::new(),
                 fingerprinter: ProvenanceFingerprinter::new(),
+                session_path: cli.session.clone(),
             };
             save_investigation(&investigation).await?;
             println!("✅ New session created: {}", style(&cli.case_id).cyan());
@@ -871,24 +873,71 @@ async fn load_or_create_investigation(cli: Cli) -> anyhow::Result<Investigation>
             session,
             detector: BasicLLMDetector::new(),
             fingerprinter: ProvenanceFingerprinter::new(),
+            session_path: cli.session.clone(),
         })
     }
 }
 
 async fn load_investigation(path: &PathBuf) -> anyhow::Result<Investigation> {
-    let content = fs::read_to_string(path)?;
-    let session: AnalysisSession = serde_json::from_str(&content)?;
+    let content = fs::read_to_string(path)
+        .with_context(|| format!("Failed to read session file: {}", path.display()))?;
+    let session: AnalysisSession = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse session JSON: {}", path.display()))?;
     
     Ok(Investigation {
         session,
         detector: BasicLLMDetector::new(),
         fingerprinter: ProvenanceFingerprinter::new(),
+        session_path: path.clone(),
     })
 }
 
 async fn save_investigation(investigation: &Investigation) -> anyhow::Result<()> {
     let content = serde_json::to_string_pretty(&investigation.session)?;
-    fs::write("session.json", content)?;
+    save_json_atomically(&investigation.session_path, content.as_bytes())
+}
+
+fn save_json_atomically(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<()> {
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => std::path::Path::new("."), // Use current directory if path has no parent or empty parent
+    };
+    
+    if !parent.is_dir() {
+        return Err(anyhow::anyhow!(
+            "Session save failed: parent directory does not exist or is not a directory: {}. Create it or choose a valid path with --session.",
+            parent.display()
+        ));
+    }
+    
+    let final_name = path.file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("session");
+    let tmp_name = format!(".{}.tmp-{}", final_name, rand::thread_rng().gen::<u32>());
+    let tmp_path = parent.join(tmp_name);
+    
+    {
+        let mut f = std::fs::OpenOptions::new()
+            .create(true).write(true).truncate(true)
+            .open(&tmp_path)
+            .with_context(|| format!("Failed to create temp session file: {}", tmp_path.display()))?;
+        f.write_all(bytes)
+            .with_context(|| format!("Failed to write temp session file: {}", tmp_path.display()))?;
+        f.sync_all()
+            .with_context(|| format!("Failed to fsync temp session file: {}", tmp_path.display()))?;
+    }
+    
+    if let Ok(dir) = std::fs::OpenOptions::new().read(true).open(parent) {
+        let _ = dir.sync_all();
+    }
+    
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("Failed to atomically replace {} with {}", path.display(), tmp_path.display()))?;
+    
+    if let Ok(dir) = std::fs::OpenOptions::new().read(true).open(parent) {
+        let _ = dir.sync_all();
+    }
+    
     Ok(())
 }
 
