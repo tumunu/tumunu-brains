@@ -1,4 +1,4 @@
-use tree_sitter::{Language, Parser, TreeCursor};
+use tree_sitter::{Parser, TreeCursor};
 
 use crate::PatternMatch;
 
@@ -43,6 +43,7 @@ impl RustPatternAnalyzer {
         Ok(Self { parser })
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn detect_suspicious_vars(&self, cursor: &mut TreeCursor, source: &str, results: &mut Vec<PatternMatch>) {
         loop {
             let node = cursor.node();
@@ -59,10 +60,10 @@ impl RustPatternAnalyzer {
                     results.push(PatternMatch {
                         pattern_name: "SuspiciousVariableName".to_string(),
                         confidence: 0.6,
-                        evidence: format!("Identifier: {}", var_name),
+                        evidence: format!("Identifier: {var_name}"),
                         line_range: (node.start_position().row, node.end_position().row),
                         node_range: (start, end),
-                        context: format!("Variable name '{}' is commonly used in LLM-generated code", var_name),
+                        context: format!("Variable name '{var_name}' is commonly used in LLM-generated code"),
                         metadata: serde_json::json!({
                             "variable_name": var_name,
                             "pattern_type": "generic_identifier"
@@ -82,6 +83,7 @@ impl RustPatternAnalyzer {
         }
     }
 
+    #[allow(clippy::only_used_in_recursion)]
     fn detect_llm_patterns(&self, cursor: &mut TreeCursor, source: &str, results: &mut Vec<PatternMatch>) {
         loop {
             let node = cursor.node();
@@ -98,7 +100,7 @@ impl RustPatternAnalyzer {
                     results.push(PatternMatch {
                         pattern_name: "VerboseFunctionSignature".to_string(),
                         confidence: 0.7,
-                        evidence: format!("Function with verbose parameter names"),
+                        evidence: "Function with verbose parameter names".to_string(),
                         line_range: (node.start_position().row, node.end_position().row),
                         node_range: (start, end),
                         context: "Function signature uses verbose parameter naming typical of LLM-generated code".to_string(),
@@ -186,7 +188,7 @@ impl ASTPatternAnalyzerTrait for JavascriptPatternAnalyzer {
     }
 
     fn analyze_code(&mut self, source_code: &str) -> Vec<PatternMatch> {
-        let tree = match self.parser.parse(source_code, None) {
+        let _tree = match self.parser.parse(source_code, None) {
             Some(tree) => tree,
             None => return vec![],
         };
@@ -214,7 +216,7 @@ impl ASTPatternAnalyzerTrait for PythonPatternAnalyzer {
     }
 
     fn analyze_code(&mut self, source_code: &str) -> Vec<PatternMatch> {
-        let tree = match self.parser.parse(source_code, None) {
+        let _tree = match self.parser.parse(source_code, None) {
             Some(tree) => tree,
             None => return vec![],
         };

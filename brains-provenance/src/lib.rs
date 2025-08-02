@@ -135,10 +135,15 @@ impl ProvenanceFingerprinter {
     }
 }
 
+impl Default for ProvenanceFingerprinter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
 
     #[test]
     fn test_token_entropy_empty() {

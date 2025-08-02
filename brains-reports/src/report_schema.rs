@@ -406,23 +406,28 @@ impl ReportSchema {
     /// Apply validation rule
     fn apply_validation_rule(
         &self,
-        _report_data: &Value,
+        report_data: &Value,
         rule: &ValidationRule,
         errors: &mut Vec<ValidationError>,
         _warnings: &mut Vec<ValidationWarning>,
     ) -> bool {
-        // Simplified rule application - in practice would use expression evaluator
         match rule.rule_name.as_str() {
             "Minimum Findings" => {
-                // Check if findings array exists and has at least one element
-                // This is a simplified check - real implementation would be more robust
+                if let Some(findings) = report_data.get("findings") {
+                    if let Some(findings_array) = findings.as_array() {
+                        if !findings_array.is_empty() {
+                            return true;
+                        }
+                    }
+                }
+                
                 errors.push(ValidationError {
                     error_id: Uuid::new_v4(),
                     field_path: "findings".to_string(),
                     error_type: "Business Rule".to_string(),
                     message: rule.error_message.clone(),
-                    actual_value: None,
-                    expected_value: None,
+                    actual_value: report_data.get("findings").cloned(),
+                    expected_value: Some(Value::String("At least one finding".to_string())),
                 });
                 false
             }
@@ -460,8 +465,41 @@ mod tests {
         
         let result = schema.validate_report(&valid_report);
         
-        // Note: This will fail due to simplified validation logic
-        // In a real implementation, the validation would be more sophisticated
-        assert!(!result.errors.is_empty()); // Expected to have errors due to simplified logic
+        assert!(!result.errors.is_empty());
+    }
+    
+    #[test]
+    fn test_minimum_findings_validation_logic() {
+        let mut schema = ReportSchema {
+            schema_id: Uuid::new_v4(),
+            schema_version: "1.0".to_string(),
+            schema_name: "Test Schema".to_string(),
+            description: "Test schema for validation".to_string(),
+            report_type: "TestReport".to_string(),
+            required_fields: Vec::new(),
+            optional_fields: Vec::new(),
+            validation_rules: vec![ValidationRule {
+                rule_id: Uuid::new_v4(),
+                rule_name: "Minimum Findings".to_string(),
+                description: "Report must have at least one finding".to_string(),
+                rule_type: RuleType::BusinessRule,
+                condition: "findings.length >= 1".to_string(),
+                error_message: "Report must contain at least one finding".to_string(),
+                severity: ValidationSeverity::Error,
+            }],
+            templates: std::collections::HashMap::new(),
+        };
+        
+        let valid_report_with_findings = serde_json::json!({
+            "findings": [
+                {
+                    "finding_id": "123",
+                    "title": "Test Finding"
+                }
+            ]
+        });
+        
+        let result = schema.validate_report(&valid_report_with_findings);
+        assert!(result.is_valid, "Report with findings should be valid but validation always fails");
     }
 }

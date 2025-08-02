@@ -12,16 +12,12 @@ use uuid::Uuid;
 
 /// Fragment correlation engine for intent reconstruction
 pub trait FragmentCorrelationEngine {
-    /// Correlate code fragments for relationship analysis
-    fn correlate_fragments(&self, samples: &[CodeFragment]) -> anyhow::Result<CorrelationScore>;
+    fn correlate_fragments(&mut self, samples: &[CodeFragment]) -> anyhow::Result<CorrelationScore>;
     
-    /// Reconstruct intent from correlated fragments
     fn reconstruct_intent(&self, correlated: &CorrelationScore) -> anyhow::Result<Option<IntentGraph>>;
     
-    /// Detect orchestration patterns across fragments
     fn detect_orchestration_patterns(&self, fragments: &[CodeFragment]) -> anyhow::Result<Vec<OrchestrationPattern>>;
     
-    /// Analyze fragment relationships
     fn analyze_relationships(&self, fragments: &[CodeFragment]) -> anyhow::Result<Vec<FragmentRelationship>>;
 }
 
@@ -376,10 +372,9 @@ impl AdvancedCorrelationEngine {
 }
 
 impl FragmentCorrelationEngine for AdvancedCorrelationEngine {
-    fn correlate_fragments(&self, samples: &[CodeFragment]) -> anyhow::Result<CorrelationScore> {
+    fn correlate_fragments(&mut self, samples: &[CodeFragment]) -> anyhow::Result<CorrelationScore> {
         let cache_key = self.generate_cache_key(samples);
         
-        // Check cache first
         if let Some(cached_score) = self.correlation_cache.get(&cache_key) {
             return Ok(cached_score.clone());
         }
@@ -387,15 +382,51 @@ impl FragmentCorrelationEngine for AdvancedCorrelationEngine {
         let mut evidence = Vec::new();
         let mut timeline = Vec::new();
         let mut overall_strength = 0.0;
-        let mut correlation_type = CorrelationType::SemanticSimilarity {
+        let correlation_type = CorrelationType::SemanticSimilarity {
             threshold: self.similarity_threshold,
             similarity_metrics: Vec::new(),
         };
         
-        // Pairwise correlation analysis
-        for (i, frag1) in samples.iter().enumerate() {
-            for (j, frag2) in samples.iter().enumerate() {
-                if i >= j { continue; }
+        if samples.len() <= 50 {
+            for (i, frag1) in samples.iter().enumerate() {
+                for (j, frag2) in samples.iter().enumerate() {
+                    if i >= j { continue; }
+                    
+                    let similarity = self.calculate_semantic_similarity(frag1, frag2);
+                    if similarity > self.similarity_threshold {
+                        evidence.push(CorrelationEvidence {
+                            evidence_type: CorrelationEvidenceType::StructuralSimilarity {
+                                similarity_score: similarity,
+                            },
+                            fragments: vec![frag1.fragment_id, frag2.fragment_id],
+                            strength: similarity,
+                            description: format!("High semantic similarity: {similarity:.3}"),
+                            metadata: HashMap::new(),
+                        });
+                        
+                        overall_strength += similarity;
+                    }
+                    
+                    let time_diff = (frag1.created_at - frag2.created_at).abs();
+                    if time_diff < self.temporal_window {
+                        timeline.push(CorrelationEvent {
+                            event_id: Uuid::new_v4(),
+                            timestamp: frag1.created_at.min(frag2.created_at),
+                            event_type: "temporal_proximity".to_string(),
+                            fragments: vec![frag1.fragment_id, frag2.fragment_id],
+                            description: format!("Fragments created within {} minutes", time_diff.num_minutes()),
+                            metadata: HashMap::new(),
+                        });
+                    }
+                }
+            }
+        } else {
+            let mut sorted_fragments = samples.to_vec();
+            sorted_fragments.sort_by_key(|f| f.semantic_hash.clone());
+            
+            for window in sorted_fragments.windows(2) {
+                let frag1 = &window[0];
+                let frag2 = &window[1];
                 
                 let similarity = self.calculate_semantic_similarity(frag1, frag2);
                 if similarity > self.similarity_threshold {
@@ -405,30 +436,20 @@ impl FragmentCorrelationEngine for AdvancedCorrelationEngine {
                         },
                         fragments: vec![frag1.fragment_id, frag2.fragment_id],
                         strength: similarity,
-                        description: format!("High semantic similarity: {:.3}", similarity),
+                        description: format!("Adjacent similarity: {similarity:.3}"),
                         metadata: HashMap::new(),
                     });
                     
                     overall_strength += similarity;
                 }
-                
-                // Temporal correlation
-                let time_diff = (frag1.created_at - frag2.created_at).abs();
-                if time_diff < self.temporal_window {
-                    timeline.push(CorrelationEvent {
-                        event_id: Uuid::new_v4(),
-                        timestamp: frag1.created_at.min(frag2.created_at),
-                        event_type: "temporal_proximity".to_string(),
-                        fragments: vec![frag1.fragment_id, frag2.fragment_id],
-                        description: format!("Fragments created within {} minutes", time_diff.num_minutes()),
-                        metadata: HashMap::new(),
-                    });
-                }
             }
         }
         
-        // Normalize strength
-        let pair_count = (samples.len() * (samples.len() - 1)) / 2;
+        let pair_count = if samples.len() <= 50 {
+            (samples.len() * (samples.len() - 1)) / 2
+        } else {
+            samples.len().saturating_sub(1)
+        };
         if pair_count > 0 {
             overall_strength /= pair_count as f64;
         }
@@ -443,6 +464,8 @@ impl FragmentCorrelationEngine for AdvancedCorrelationEngine {
             confidence: if overall_strength > 0.8 { 0.9 } else { overall_strength },
             metadata: HashMap::new(),
         };
+        
+        self.correlation_cache.insert(cache_key, score.clone());
         
         Ok(score)
     }
@@ -464,7 +487,7 @@ impl FragmentCorrelationEngine for AdvancedCorrelationEngine {
             let mut confidence = 0.5;
             
             // Try different classifiers
-            for (classifier_name, classifier) in &self.intent_classifiers {
+            for (_classifier_name, classifier) in &self.intent_classifiers {
                 let fragment_confidence = classifier.confidence(fragment);
                 if fragment_confidence > confidence {
                     intent_type = classifier.classify_intent(fragment)?;
@@ -598,6 +621,59 @@ impl FragmentCorrelationEngine for AdvancedCorrelationEngine {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+
+    fn create_test_fragment(id: &str, content: &str) -> CodeFragment {
+        CodeFragment {
+            fragment_id: Uuid::new_v4(),
+            content: content.to_string(),
+            source_file: format!("test_{}.rs", id),
+            line_range: (1, 10),
+            language: "rust".to_string(),
+            ast_hash: "test_ast_hash".to_string(),
+            semantic_hash: "test_semantic_hash".to_string(),
+            pattern_matches: Vec::new(),
+            detection_results: Vec::new(),
+            metadata: HashMap::new(),
+            created_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn test_cache_functionality() {
+        let mut engine = AdvancedCorrelationEngine::new();
+        let fragments = vec![
+            create_test_fragment("1", "fn test() { println!(\"hello\"); }"),
+            create_test_fragment("2", "fn test() { println!(\"world\"); }"),
+        ];
+
+        let result1 = engine.correlate_fragments(&fragments).unwrap();
+        let cache_key = engine.generate_cache_key(&fragments);
+        
+        assert!(engine.correlation_cache.get(&cache_key).is_some(), "Cache should contain result after first computation");
+        
+        let result2 = engine.correlate_fragments(&fragments).unwrap();
+        assert_eq!(result1.correlation_id, result2.correlation_id, "Cached results should be identical");
+    }
+
+    #[test] 
+    fn test_pairwise_performance() {
+        let engine = AdvancedCorrelationEngine::new();
+        let fragments: Vec<CodeFragment> = (0..100)
+            .map(|i| create_test_fragment(&i.to_string(), &format!("fn test_{}() {{}}", i)))
+            .collect();
+
+        let start = std::time::Instant::now();
+        let _result = engine.correlate_fragments(&fragments).unwrap();
+        let duration = start.elapsed();
+        
+        assert!(duration.as_millis() < 1000, "O(n²) algorithm too slow for 100 fragments: {:?}", duration);
+    }
+}
+
 impl AdvancedCorrelationEngine {
     /// Classify overall intent from individual intents
     fn classify_overall_intent(&self, nodes: &[IntentNode]) -> anyhow::Result<OverallIntent> {
@@ -683,6 +759,12 @@ pub struct SurveillanceClassifier;
 impl SurveillanceClassifier {
     pub fn new() -> Self {
         Self
+    }
+}
+
+impl Default for SurveillanceClassifier {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

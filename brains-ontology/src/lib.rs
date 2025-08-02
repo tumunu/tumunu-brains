@@ -114,3 +114,24 @@ impl DetectionOntology {
         self.patterns.get(id)
     }
 }
+
+impl Default for DetectionOntology {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for PerformanceMetrics {
+    fn default() -> Self {
+        Self {
+            precision: f64::NAN,
+            recall: f64::NAN,
+            f1_score: f64::NAN,
+            accuracy: f64::NAN,
+            false_positive_rate: f64::NAN,
+            false_negative_rate: f64::NAN,
+            execution_time_ms: 0,
+            memory_usage_mb: f64::NAN,
+        }
+    }
+}
