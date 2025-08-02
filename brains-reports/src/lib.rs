@@ -319,18 +319,13 @@ impl ForensicReport {
     pub fn sign(&mut self, keypair: &SigningKey, signer_role: String) -> Result<()> {
         use signature::ReportSignature;
         
-        // Update hash before signing
         self.update_integrity_hash();
         
-        // Create signature with deterministic preimage aligned to verify_signature():
-        // format!("{}{}{}", report_id, signed_hash, signed_at.timestamp())
         let signed_at = Utc::now();
         let signature_data = format!("{}{}{}",
             self.report_id,
             self.integrity_hash,
             signed_at.timestamp()
-        );
-            self.updated_at.timestamp()
         );
         
         let signature = keypair.sign(signature_data.as_bytes());
@@ -369,21 +364,18 @@ impl ForensicReport {
     
     /// Verify single signature
     pub fn verify_signature(&self, signature: &signature::ReportSignature) -> Result<bool> {
-        // Reconstruct signature data
         let signature_data = format!("{}{}{}", 
             self.report_id, 
             signature.signed_hash, 
             signature.signed_at.timestamp()
         );
         
-        // Decode public key and signature
         let public_key_bytes = hex::decode(&signature.public_key)?;
         let signature_bytes = hex::decode(&signature.signature)?;
         
         let public_key = VerifyingKey::from_bytes(&public_key_bytes.try_into().map_err(|_| anyhow::anyhow!("Invalid public key length"))?)?;
         let sig = Signature::from_bytes(&signature_bytes.try_into().map_err(|_| anyhow::anyhow!("Invalid signature length"))?);
         
-        // Verify signature
         match public_key.verify(signature_data.as_bytes(), &sig) {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
@@ -577,6 +569,29 @@ mod tests {
         
         assert_eq!(report.signatures.len(), 1);
         assert!(report.verify_signatures().unwrap());
+    }
+
+    #[test]
+    fn test_signature_preimage_consistency() {
+        let investigator = create_test_investigator();
+        let case_info = create_test_case();
+        
+        let mut report = ForensicReport::new(
+            ReportType::LLMDetectionAnalysis,
+            "Preimage Consistency Test".to_string(),
+            investigator,
+            case_info,
+        );
+        
+        let mut csprng = OsRng;
+        let keypair = SigningKey::generate(&mut csprng);
+        
+        report.sign(&keypair, "Test Investigator".to_string()).unwrap();
+        
+        let signature = &report.signatures[0];
+        let verification_result = report.verify_signature(signature).unwrap();
+        
+        assert!(verification_result, "Signature verification failed due to preimage mismatch between sign() and verify_signature()");
     }
     
     #[test]

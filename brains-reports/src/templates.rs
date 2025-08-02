@@ -33,17 +33,24 @@ pub struct RenderedReport {
 }
 
 impl TemplateEngine {
-    /// Create new template engine
     pub fn new() -> Self {
         let mut engine = Self {
             templates: HashMap::new(),
             custom_helpers: HashMap::new(),
         };
         
-        // Register default templates
         engine.register_default_templates();
         
         engine
+    }
+    
+    fn html_escape(&self, input: &str) -> String {
+        input
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#x27;")
     }
     
     /// Register a template
@@ -88,14 +95,15 @@ impl TemplateEngine {
     ) -> anyhow::Result<String> {
         let mut rendered = template_content.to_string();
         
-        // Simple variable substitution (in practice, would use a proper template engine)
         for (key, value) in &context.variables {
             let placeholder = format!("{{{{{}}}}}", key);
-            let replacement = self.value_to_string(value);
+            let replacement = match context.output_format {
+                OutputFormat::Html => self.html_escape(&self.value_to_string(value)),
+                _ => self.value_to_string(value),
+            };
             rendered = rendered.replace(&placeholder, &replacement);
         }
         
-        // Apply format-specific processing
         match context.output_format {
             OutputFormat::Html => self.process_html(&rendered),
             OutputFormat::Markdown => Ok(rendered),
@@ -410,5 +418,27 @@ mod tests {
         
         let executive_templates = engine.get_templates_by_type(TemplateType::Executive);
         assert!(!executive_templates.is_empty());
+    }
+    
+    #[test]
+    fn test_html_escaping() {
+        let engine = TemplateEngine::new();
+        
+        let mut context = RenderContext {
+            variables: HashMap::new(),
+            helpers: HashMap::new(),
+            output_format: OutputFormat::Html,
+        };
+        
+        context.variables.insert("malicious_title".to_string(), 
+            Value::String("<script>alert('xss')</script>".to_string()));
+        
+        let result = engine.render("executive", &context);
+        assert!(result.is_ok());
+        
+        let rendered = result.unwrap();
+        assert!(rendered.content.contains("&lt;script&gt;"));
+        assert!(rendered.content.contains("&lt;/script&gt;"));
+        assert!(!rendered.content.contains("<script>"));
     }
 }

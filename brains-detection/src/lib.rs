@@ -280,14 +280,12 @@ impl BasicLLMDetector {
     }
 
     fn analyze_token_patterns(&self, code: &str) -> f64 {
-        // Simple pattern matching for demonstration
         let mut score: f64 = 0.0;
-        let lines: Vec<&str> = code.lines().collect();
 
-        for (pattern_type, patterns) in &self.pattern_signatures {
+        for patterns in self.pattern_signatures.values() {
             for pattern in patterns {
                 if code.contains(pattern) {
-                    score += 0.1; // Each pattern adds to LLM likelihood
+                    score += 0.1;
                 }
             }
         }
@@ -314,7 +312,7 @@ impl LLMDetector for BasicLLMDetector {
                     column_end: 1,
                     context: Some("Full code analysis".to_string()),
                 },
-                signature: format!("token_pattern_{:.3}", confidence),
+                signature: format!("token_pattern_{confidence:.3}"),
                 confidence,
                 metadata: HashMap::new(),
             }
@@ -359,7 +357,7 @@ impl LLMDetector for BasicLLMDetector {
                 for sig in signatures {
                     self.pattern_signatures
                         .entry("learned_patterns".to_string())
-                        .or_insert_with(Vec::new)
+                        .or_default()
                         .push(sig.clone());
                 }
             }

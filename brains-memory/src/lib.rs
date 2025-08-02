@@ -85,7 +85,7 @@ impl MemoryStore {
 
     pub fn list(&self, category: Option<&str>) -> anyhow::Result<Vec<&MemoryEntry>> {
         Ok(self.entries.values()
-            .filter(|e| category.map_or(true, |c| e.category.as_deref() == Some(c)))
+            .filter(|e| category.is_none_or(|c| e.category.as_deref() == Some(c)))
             .collect())
     }
 }
