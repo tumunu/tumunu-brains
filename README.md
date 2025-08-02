@@ -1,4 +1,4 @@
-# Tumunu Brains
+# Brains
 
 A forensic intelligence platform for advanced code analysis and pattern detection.
 
