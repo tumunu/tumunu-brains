@@ -14,11 +14,13 @@ pub mod registry;
 pub mod plugin;
 pub mod versioning;
 pub mod governance;
+pub mod fs_scanner;
 
 pub use registry::PluginRegistry;
 pub use plugin::{Plugin, PluginMetadata, PluginInterface};
 pub use versioning::{ApiVersion, Compatibility};
 pub use governance::{PluginGovernance, ApprovalStatus};
+pub use fs_scanner::{ScanOptions, SourceFile, collect_source_files, default_ext_map, parse_ext_map_config, merge_ext_maps};
 
 /// Core plugin system for forensic intelligence platform
 #[derive(Serialize, Deserialize)]

@@ -17,6 +17,7 @@ brains-forensics = { path = "../brains-forensics" }
 brains-provenance = { path = "../brains-provenance" }
 brains-memory = { path = "../brains-memory" }
 brains-reports = { path = "../brains-reports" }
+brains-core = { path = "../brains-core" }
 nix = "0.27"
 rand = "0.8"
 ed25519-dalek = "2.0"

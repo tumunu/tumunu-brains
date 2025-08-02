@@ -13,6 +13,7 @@ brains-forensics = { path = "../brains-forensics" }
 brains-correlation = { path = "../brains-correlation" }
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 chrono.workspace = true
 uuid.workspace = true
 anyhow.workspace = true
@@ -20,6 +21,11 @@ thiserror.workspace = true
 semver = "1.0"
 libloading = "0.8"
 tempfile = "3.0"
+walkdir = "2"
+globset = "0.4"
+ignore = "0.4"
+toml = "0.8"
+log = "0.4"
 
 [dev-dependencies]
 proptest.workspace = true

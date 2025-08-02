@@ -24,10 +24,108 @@ use brains_detection::{
 };
 use brains_forensics::{PatternMatch, ASTPatternAnalyzer};
 use brains_provenance::ProvenanceFingerprinter;
+use brains_core::{ScanOptions, SourceFile, collect_source_files, default_ext_map, parse_ext_map_config, merge_ext_maps};
 use uuid::Uuid;
 
 // CLI specific
 use clap::Subcommand;
+
+/// Output stream abstraction for clean separation of data and status streams
+struct Output {
+    data_out: Box<dyn Write + Send>,
+    status_out: Box<dyn Write + Send>,
+    quiet: bool,
+    no_banner: bool,
+}
+
+impl Output {
+    fn new(quiet: bool, no_banner: bool) -> Self {
+        Self {
+            data_out: Box::new(std::io::stdout()),
+            status_out: Box::new(std::io::stderr()),
+            quiet,
+            no_banner,
+        }
+    }
+    
+    fn write_data(&mut self, content: &str) -> Result<(), std::io::Error> {
+        writeln!(self.data_out, "{}", content)?;
+        self.data_out.flush()
+    }
+    
+    fn write_status(&mut self, message: &str) -> Result<(), std::io::Error> {
+        if !self.quiet {
+            writeln!(self.status_out, "{}", message)?;
+            self.status_out.flush()?;
+        }
+        Ok(())
+    }
+    
+    fn banner(&mut self, message: &str) -> Result<(), std::io::Error> {
+        if !self.no_banner && !self.quiet {
+            writeln!(self.status_out, "{}", message)?;
+            self.status_out.flush()?;
+        }
+        Ok(())
+    }
+    
+    fn warn(&mut self, message: &str) -> Result<(), std::io::Error> {
+        writeln!(self.status_out, "{}", message)?;
+        self.status_out.flush()
+    }
+    
+    fn error(&mut self, message: &str) -> Result<(), std::io::Error> {
+        writeln!(self.status_out, "{}", message)?;
+        self.status_out.flush()
+    }
+}
+
+/// Output format enumeration
+#[derive(Debug, Clone)]
+enum OutputFormat {
+    Json,
+    Yaml,
+    Markdown,
+    Table,
+    Human,
+}
+
+impl OutputFormat {
+    fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "json" => Self::Json,
+            "yaml" | "yml" => Self::Yaml,
+            "markdown" | "md" => Self::Markdown,
+            "table" => Self::Table,
+            _ => Self::Human,
+        }
+    }
+}
+
+/// Render payload to output stream based on format
+fn render_payload<T: serde::Serialize + std::fmt::Debug>(
+    format: &OutputFormat,
+    value: &T,
+    output: &mut Output,
+) -> AnyResult<()> {
+    match format {
+        OutputFormat::Json => {
+            let json_str = serde_json::to_string_pretty(value)
+                .context("Failed to serialize to JSON")?;
+            output.write_data(&json_str)?;
+        }
+        OutputFormat::Yaml => {
+            let yaml_str = serde_yaml::to_string(value)
+                .context("Failed to serialize to YAML")?;
+            output.write_data(&yaml_str)?;
+        }
+        OutputFormat::Markdown | OutputFormat::Table | OutputFormat::Human => {
+            let content = format!("{:#?}", value);
+            output.write_data(&content)?;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Parser)]
 #[command(name = "brains")]
@@ -41,6 +139,14 @@ struct Cli {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+    
+    /// Suppress progress and informational messages (errors still shown)
+    #[arg(short, long)]
+    quiet: bool,
+    
+    /// Suppress startup banner
+    #[arg(long)]
+    no_banner: bool,
     
     /// Investigation session file
     #[arg(short, long, default_value = "session.json")]
@@ -127,6 +233,7 @@ enum ForensicsAction {
     /// Analyze code for patterns
     Analyze {
         /// Path to code/file to analyze
+        #[arg(long, default_value = ".")]
         path: PathBuf,
         
         /// Pattern type to detect (llm, surveillance, vulnerability)
@@ -136,6 +243,38 @@ enum ForensicsAction {
         /// Recursive directory analysis
         #[arg(short, long)]
         recursive: bool,
+        
+        /// Include patterns (glob, repeatable)
+        #[arg(long, action = clap::ArgAction::Append)]
+        include: Vec<String>,
+        
+        /// Exclude patterns (glob, repeatable)
+        #[arg(long, action = clap::ArgAction::Append)]
+        exclude: Vec<String>,
+        
+        /// Maximum file size in bytes
+        #[arg(long)]
+        max_file_size: Option<u64>,
+        
+        /// Language extension mapping (file path or inline JSON)
+        #[arg(long)]
+        lang_ext_map: Option<String>,
+        
+        /// Follow symbolic links
+        #[arg(long)]
+        follow_symlinks: bool,
+        
+        /// Include hidden files and directories
+        #[arg(long)]
+        hidden: bool,
+        
+        /// Respect .gitignore files
+        #[arg(long, default_value = "true")]
+        respect_gitignore: bool,
+        
+        /// Print discovered files for verification
+        #[arg(long)]
+        print_files: bool,
         
         /// Minimum confidence threshold (0.0-1.0)
         #[arg(long, default_value = "0.5")]
@@ -248,6 +387,9 @@ struct Investigation {
 async fn main() -> AnyResult<()> {
     let args = Cli::parse();
     
+    // Create output abstraction for stream separation
+    let mut output = Output::new(args.quiet, args.no_banner);
+    
     // Set up logging based on verbosity
     let log_level = match args.verbose {
         true => "debug",
@@ -266,20 +408,37 @@ async fn main() -> AnyResult<()> {
                 path,
                 pattern_type,
                 recursive,
+                include,
+                exclude,
+                max_file_size,
+                lang_ext_map,
+                follow_symlinks,
+                hidden,
+                respect_gitignore,
+                print_files,
                 confidence,
                 format,
                 stats,
                 patterns
             } => {
                 analyze_command(
+                    &mut output,
                     args,
-                    path.to_path_buf(),
-                    pattern_type.to_string(),
+                    path,
+                    pattern_type,
                     recursive,
+                    include,
+                    exclude,
+                    max_file_size,
+                    lang_ext_map,
+                    follow_symlinks,
+                    hidden,
+                    respect_gitignore,
+                    print_files,
                     confidence,
-                    format.to_string(),
+                    format,
                     stats,
-                    patterns.clone()
+                    patterns
                 )
                 .await
                 .context("Analysis failed")?;
@@ -290,6 +449,7 @@ async fn main() -> AnyResult<()> {
                 sandbox 
             } => {
                 detect_command(
+                    &mut output,
                     args,
                     artifacts,
                     surveillance_type.to_string(),
@@ -304,6 +464,7 @@ async fn main() -> AnyResult<()> {
                 explainable 
             } => {
                 classify_command(
+                    &mut output,
                     args,
                     samples,
                     format.to_string(),
@@ -313,11 +474,11 @@ async fn main() -> AnyResult<()> {
                 .context("Classification failed")?;
             }
         },
-        Commands::Report { session, format, output } => {
-            report_command(args, session, format, output).await?;
+        Commands::Report { session, format, output: output_path } => {
+            report_command(&mut output, args, session, format, output_path).await?;
         }
         Commands::Server { action } => {
-            server_command(args, action).await?;
+            server_command(&mut output, args, action).await?;
         }
     }
     
@@ -325,46 +486,87 @@ async fn main() -> AnyResult<()> {
 }
 
 async fn analyze_command(
+    output: &mut Output,
     args: Cli,
-    input_path: PathBuf,
+    path: PathBuf,
     pattern_type: String,
     recursive: bool,
+    include: Vec<String>,
+    exclude: Vec<String>,
+    max_file_size: Option<u64>,
+    lang_ext_map: Option<String>,
+    follow_symlinks: bool,
+    hidden: bool,
+    respect_gitignore: bool,
+    print_files: bool,
     confidence: f64,
     format: String,
     stats: bool,
     patterns: Option<String>,
 ) -> AnyResult<()> {
     // Setup analysis session
-    println!("{}", style("Starting Forensic Analysis").bold().blue());
-    println!("{}", style("-".repeat(40)).dim());
+    output.banner(&format!("{}", style("Starting Forensic Analysis").bold().blue()))?;
+    output.banner(&format!("{}", style("-".repeat(40)).dim()))?;
     
     let mut investigation = match load_or_create_investigation(args).await {
         Ok(inv) => inv,
         Err(e) => {
-            eprintln!("Failed to load investigation: {}", e);
+            output.error(&format!("Failed to load investigation: {}", e))?;
             return Err(e.into());
         }
     };
 
-    // Process input file(s)
+    // Build extension-to-language mapping
+    let mut ext_lang_map = default_ext_map();
+    if let Some(lang_map_input) = lang_ext_map {
+        let overrides = parse_ext_map_config(&lang_map_input)
+            .context("Failed to parse language extension mapping")?;
+        ext_lang_map = merge_ext_maps(ext_lang_map, overrides);
+    }
+
+    // Build scan options
+    let scan_opts = ScanOptions {
+        root: path.clone(),
+        recursive,
+        include,
+        exclude,
+        max_file_size,
+        follow_symlinks,
+        include_hidden: hidden,
+        respect_gitignore,
+        ext_lang_map,
+    };
+
+    // Collect source files using the new fs_scanner
+    let source_files = collect_source_files(&scan_opts)
+        .context("Failed to collect source files")?;
+
+    // Print files if requested for verification
+    if print_files {
+        output.write_status(&format!("{}", style("Discovered files:").bold().green()))?;
+        for file in &source_files {
+            output.write_status(&format!("{}", serde_json::json!({
+                "rel_path": file.rel_path,
+                "language": file.language,
+                "size": file.size
+            })))?;
+        }
+        output.write_status("")?;
+    }
+
+    // Process files for analysis
     let mut analyzer = ASTPatternAnalyzer::new()?;
     let mut all_results: Vec<DetectionResult> = Vec::new();
     let mut all_stats = Vec::new();
 
-    let files = if recursive && input_path.is_dir() {
-        collect_source_files(&input_path)?
-    } else {
-        vec![input_path.clone()]
-    };
-
-    for file_path in files {
-        println!("Analyzing: {}", style(file_path.display()).yellow());
+    for source_file in &source_files {
+        output.write_status(&format!("Analyzing: {}", style(source_file.rel_path.display()).yellow()))?;
         
-        let file_content = fs::read_to_string(&file_path)?;
-        let language = detect_language(&file_path)?;
+        let file_content = fs::read_to_string(&source_file.path)
+            .with_context(|| format!("Failed to read file: {}", source_file.path.display()))?;
         
         // Run pattern analysis
-        let matches = analyzer.analyze_code(&file_content, &language);
+        let matches = analyzer.analyze_code(&file_content, &source_file.language);
         
         // Filter matches
         let filtered_matches: Vec<PatternMatch> = matches.into_iter()
@@ -384,7 +586,7 @@ async fn analyze_command(
         // Generate AST stats if requested
         if stats {
             let file_stats = format!("File: {}, Language: {}, Size: {} bytes", 
-                file_path.display(), language, file_content.len());
+                source_file.rel_path.display(), source_file.language, source_file.size);
             all_stats.push(file_stats);
         }
 
@@ -399,7 +601,7 @@ async fn analyze_command(
                             pattern_name: m.pattern_name.clone(),
                         },
                         location: CodeLocation {
-                            file_path: Some(file_path.display().to_string()),
+                            file_path: Some(source_file.rel_path.display().to_string()),
                             line_start: m.line_range.0,
                             line_end: m.line_range.1,
                             column_start: m.node_range.0,
@@ -417,10 +619,10 @@ async fn analyze_command(
                     }],
                     provenance: Provenance {
                         git_hash: None,
-                        build_id: "ast_pattern_analyzer_v1".to_string(),
+                        build_id: "fs_scanner_v1".to_string(),
                         timestamp: chrono::Utc::now(),
                         analyzer_version: "0.1.0".to_string(),
-                        environment_fingerprint: "ast_env".to_string(),
+                        environment_fingerprint: "fs_scanner_env".to_string(),
                         input_hash: format!("{:x}", md5::compute(&file_content)),
                     },
                     rationale: format!("AST pattern match: {}", m.pattern_name),
@@ -439,10 +641,16 @@ async fn analyze_command(
     }
     save_investigation(&investigation).await?;
 
-    // Generate output
-    match format.as_str() {
-        "json" => {
-            let output = if stats {
+    // Generate completion status
+    output.write_status(&format!("\n{}", style(format!("Analysis complete. Found {} files, {} results", 
+        source_files.len(), all_results.len())).bold().green()))?;
+
+    // Render final output
+    let output_format = OutputFormat::from_str(&format);
+    
+    match output_format {
+        OutputFormat::Json => {
+            let payload = if stats {
                 serde_json::json!({
                     "results": all_results,
                     "statistics": all_stats
@@ -450,28 +658,28 @@ async fn analyze_command(
             } else {
                 serde_json::json!(all_results)
             };
-            println!("{}", serde_json::to_string_pretty(&output)?);
+            render_payload(&output_format, &payload, output)?;
         }
-        "yaml" => {
-            let output = if stats {
-                serde_yaml::to_string(&(
-                    all_results,
-                    all_stats
-                ))?
+        OutputFormat::Yaml => {
+            let payload = if stats {
+                serde_json::json!({
+                    "results": all_results,
+                    "statistics": all_stats
+                })
             } else {
-                serde_yaml::to_string(&all_results)?
+                serde_json::json!(all_results)
             };
-            println!("{}", output);
+            render_payload(&output_format, &payload, output)?;
         }
-        "markdown" => {
-            print_markdown_report(&all_results, all_stats.as_slice());
+        OutputFormat::Markdown => {
+            print_markdown_report(output, &all_results, all_stats.as_slice())?;
         }
-        "table" => {
-            print_table_output(&all_results);
+        OutputFormat::Table => {
+            print_table_output(output, &all_results)?;
         }
-        _ => {
-            println!("Unsupported format '{}', defaulting to table", format);
-            print_table_output(&all_results);
+        OutputFormat::Human => {
+            output.warn(&format!("Unsupported format '{}', defaulting to table", format))?;
+            print_table_output(output, &all_results)?;
         }
     }
 
@@ -569,12 +777,13 @@ async fn session_command(cli: Cli, action: SessionAction) -> AnyResult<()> {
 }
 
 async fn report_command(
+    output_stream: &mut Output,
     cli: Cli,
     session: Option<PathBuf>,
     format: String,
     output: Option<PathBuf>,
 ) -> AnyResult<()> {
-    println!("{}", style("Generating forensic report").bold().green());
+    output_stream.banner(&format!("{}", style("Generating forensic report").bold().green()))?;
     
     let session_path = session.unwrap_or(cli.session);
     let investigation = load_investigation(&session_path).await?;
@@ -606,7 +815,7 @@ async fn report_command(
     Ok(())
 }
 
-async fn server_command(cli: Cli, action: ServerAction) -> AnyResult<()> {
+async fn server_command(output: &mut Output, cli: Cli, action: ServerAction) -> AnyResult<()> {
     let pid_file = PathBuf::from("brains-server.pid");
     
     match action {
@@ -689,6 +898,25 @@ async fn server_command(cli: Cli, action: ServerAction) -> AnyResult<()> {
     Ok(())
 }
 
+/// Helper function to collect files using legacy path-based interface
+/// This maintains backward compatibility for commands that haven't been fully migrated
+fn collect_files_legacy(path: &PathBuf, recursive: bool) -> AnyResult<Vec<SourceFile>> {
+    let scan_opts = ScanOptions {
+        root: path.clone(),
+        recursive,
+        include: Vec::new(),
+        exclude: Vec::new(),
+        max_file_size: None,
+        follow_symlinks: false,
+        include_hidden: false,
+        respect_gitignore: true,
+        ext_lang_map: default_ext_map(),
+    };
+    
+    collect_source_files(&scan_opts)
+        .context("Failed to collect source files")
+}
+
 async fn validate_command(
     cli: Cli,
     dataset: PathBuf,
@@ -709,9 +937,15 @@ async fn validate_command(
     
     // Collect dataset files
     let dataset_files = if dataset.is_dir() {
-        collect_source_files(&dataset)?
+        collect_files_legacy(&dataset, true)?
     } else {
-        vec![dataset.clone()]
+        // For single files, create a minimal SourceFile entry
+        vec![SourceFile {
+            path: dataset.clone(),
+            rel_path: dataset.file_name().unwrap_or_default().into(),
+            language: "unknown".to_string(),
+            size: dataset.metadata().map(|m| m.len()).unwrap_or(0),
+        }]
     };
     
     if dataset_files.is_empty() {
@@ -753,13 +987,12 @@ async fn validate_command(
         let mut false_negatives = 0;
         
         for test_file in test_files {
-            let file_content = fs::read_to_string(test_file)?;
-            let language = detect_language(test_file)?;
-            let matches = analyzer.analyze_code(&file_content, &language);
+            let file_content = fs::read_to_string(&test_file.path)?;
+            let matches = analyzer.analyze_code(&file_content, &test_file.language);
             
             // Determine ground truth based on filename or content
-            let is_positive = test_file.to_string_lossy().contains("positive") || 
-                             test_file.to_string_lossy().contains("suspicious") ||
+            let is_positive = test_file.path.to_string_lossy().contains("positive") || 
+                             test_file.path.to_string_lossy().contains("suspicious") ||
                              matches.iter().any(|m| m.confidence > 0.8);
             
             // Determine prediction based on model
@@ -941,41 +1174,9 @@ fn save_json_atomically(path: &std::path::Path, bytes: &[u8]) -> anyhow::Result<
     Ok(())
 }
 
-fn detect_language(path: &PathBuf) -> anyhow::Result<String> {
-    let extension = path.extension()
-        .and_then(|ext| ext.to_str())
-        .unwrap_or("unknown");
-    
-    let language = match extension {
-        "rs" => "rust",
-        "js" | "ts" => "javascript",
-        "py" => "python",
-        "c" | "cpp" | "cc" | "cxx" => "cpp",
-        "java" => "java",
-        "go" => "go",
-        _ => "unknown",
-    };
-    
-    Ok(language.to_string())
-}
 
-fn collect_source_files(dir: &PathBuf) -> AnyResult<Vec<PathBuf>> {
-    let mut files = Vec::new();
-    for entry in fs::read_dir(dir)? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(ext) = path.extension() {
-                if ext == "rs" || ext == "js" || ext == "py" || ext == "go" {
-                    files.push(path);
-                }
-            }
-        }
-    }
-    Ok(files)
-}
 
-fn print_table_output(results: &[DetectionResult]) {
+fn print_table_output(output: &mut Output, results: &[DetectionResult]) -> Result<(), std::io::Error> {
     use tabled::builder::Builder;
     
     let mut builder = Builder::default();
@@ -999,42 +1200,44 @@ fn print_table_output(results: &[DetectionResult]) {
         ]);
     }
     
-    println!("{}", builder.build());
+    output.write_data(&format!("{}", builder.build()))
 }
 
 fn print_markdown_report(
+    output: &mut Output,
     results: &Vec<DetectionResult>,
     _stats: &[String],
-) {
-    println!("# Forensic Analysis Report");
-    println!();
-    println!("## Detection Results");
-    println!("- **Total Results**: {}", results.len());
-    println!();
+) -> Result<(), std::io::Error> {
+    let mut markdown = String::new();
+    markdown.push_str("# Forensic Analysis Report\n\n");
+    markdown.push_str("## Detection Results\n");
+    markdown.push_str(&format!("- **Total Results**: {}\n\n", results.len()));
     
     for (i, result) in results.iter().enumerate() {
-        println!("### Result {}", i + 1);
-        println!("- **Confidence**: {:.3}", result.confidence);
-        println!("- **Pattern ID**: {}", result.pattern_id);
-        println!("- **Evidence Count**: {}", result.evidence.len());
-        println!("- **Rationale**: {}", result.rationale);
+        markdown.push_str(&format!("### Result {}\n", i + 1));
+        markdown.push_str(&format!("- **Confidence**: {:.3}\n", result.confidence));
+        markdown.push_str(&format!("- **Pattern ID**: {}\n", result.pattern_id));
+        markdown.push_str(&format!("- **Evidence Count**: {}\n", result.evidence.len()));
+        markdown.push_str(&format!("- **Rationale**: {}\n\n", result.rationale));
         
-        println!("#### Metadata");
-        println!("- **Analysis Timestamp**: {}", result.detection_timestamp);
-        println!("- **Analyzer Version**: {}", result.provenance.analyzer_version);
-        println!("- **Input Hash**: {}", result.provenance.input_hash);
-        println!();
+        markdown.push_str("#### Metadata\n");
+        markdown.push_str(&format!("- **Analysis Timestamp**: {}\n", result.detection_timestamp));
+        markdown.push_str(&format!("- **Analyzer Version**: {}\n", result.provenance.analyzer_version));
+        markdown.push_str(&format!("- **Input Hash**: {}\n\n", result.provenance.input_hash));
     }
+    
+    output.write_data(&markdown)
 }
 
 async fn detect_command(
+    output: &mut Output,
     args: Cli,
     artifacts: PathBuf,
     surveillance_type: String,
     sandbox: bool,
 ) -> AnyResult<()> {
-    println!("{}", style("Starting surveillance detection analysis").bold().blue());
-    println!("{}", style("-".repeat(50)).dim());
+    output.banner(&format!("{}", style("Starting surveillance detection analysis").bold().blue()))?;
+    output.banner(&format!("{}", style("-".repeat(50)).dim()))?;
     
     // Validate input path
     if !artifacts.exists() {
@@ -1054,24 +1257,28 @@ async fn detect_command(
     
     // Process artifacts
     let files = if artifacts.is_dir() {
-        collect_source_files(&artifacts)?
+        collect_files_legacy(&artifacts, true)?
     } else {
-        vec![artifacts]
+        vec![SourceFile {
+            path: artifacts.clone(),
+            rel_path: artifacts.file_name().unwrap_or_default().into(),
+            language: "unknown".to_string(),
+            size: artifacts.metadata().map(|m| m.len()).unwrap_or(0),
+        }]
     };
     
-    for file_path in files {
-        println!("Scanning: {}", style(file_path.display()).yellow());
+    for source_file in files {
+        println!("Scanning: {}", style(source_file.rel_path.display()).yellow());
         
-        let file_content = match fs::read_to_string(&file_path) {
+        let file_content = match fs::read_to_string(&source_file.path) {
             Ok(content) => content,
             Err(e) => {
-                warn!("Failed to read file {}: {}", file_path.display(), e);
+                warn!("Failed to read file {}: {}", source_file.path.display(), e);
                 continue;
             }
         };
         
-        let language = detect_language(&file_path)?;
-        let matches = analyzer.analyze_code(&file_content, &language);
+        let matches = analyzer.analyze_code(&file_content, &source_file.language);
         
         // Filter matches for surveillance patterns
         let surveillance_matches: Vec<PatternMatch> = matches.into_iter()
@@ -1100,7 +1307,7 @@ async fn detect_command(
                         pattern_name: pattern_match.pattern_name.clone(),
                     },
                     location: CodeLocation {
-                        file_path: Some(file_path.display().to_string()),
+                        file_path: Some(source_file.rel_path.display().to_string()),
                         line_start: pattern_match.line_range.0,
                         line_end: pattern_match.line_range.1,
                         column_start: pattern_match.node_range.0,
@@ -1140,26 +1347,27 @@ async fn detect_command(
     save_investigation(&investigation).await?;
     
     // Display results
-    println!("\n{}", style("Detection Summary").bold().green());
-    println!("Total surveillance artifacts detected: {}", style(detection_results.len()).bold());
+    output.write_status(&format!("\n{}", style("Detection Summary").bold().green()))?;
+    output.write_status(&format!("Total surveillance artifacts detected: {}", style(detection_results.len()).bold()))?;
     
     if !detection_results.is_empty() {
-        print_table_output(&detection_results);
+        print_table_output(output, &detection_results)?;
     } else {
-        println!("{}", style("No surveillance artifacts detected").dim());
+        output.write_status(&format!("{}", style("No surveillance artifacts detected").dim()))?;
     }
     
     Ok(())
 }
 
 async fn classify_command(
+    output: &mut Output,
     args: Cli,
     samples: PathBuf,
     format: String,
     explainable: bool,
 ) -> AnyResult<()> {
-    println!("{}", style("Starting sample classification").bold().blue());
-    println!("{}", style("-".repeat(40)).dim());
+    output.banner(&format!("{}", style("Starting sample classification").bold().blue()))?;
+    output.banner(&format!("{}", style("-".repeat(40)).dim()))?;
     
     // Validate input path
     if !samples.exists() {
@@ -1179,24 +1387,28 @@ async fn classify_command(
     
     // Process samples
     let files = if samples.is_dir() {
-        collect_source_files(&samples)?
+        collect_files_legacy(&samples, true)?
     } else {
-        vec![samples]
+        vec![SourceFile {
+            path: samples.clone(),
+            rel_path: samples.file_name().unwrap_or_default().into(),
+            language: "unknown".to_string(),
+            size: samples.metadata().map(|m| m.len()).unwrap_or(0),
+        }]
     };
     
-    for file_path in files {
-        println!("Classifying: {}", style(file_path.display()).yellow());
+    for source_file in files {
+        println!("Classifying: {}", style(source_file.rel_path.display()).yellow());
         
-        let file_content = match fs::read_to_string(&file_path) {
+        let file_content = match fs::read_to_string(&source_file.path) {
             Ok(content) => content,
             Err(e) => {
-                warn!("Failed to read file {}: {}", file_path.display(), e);
+                warn!("Failed to read file {}: {}", source_file.path.display(), e);
                 continue;
             }
         };
         
-        let language = detect_language(&file_path)?;
-        let matches = analyzer.analyze_code(&file_content, &language);
+        let matches = analyzer.analyze_code(&file_content, &source_file.language);
         
         // Classify based on pattern analysis
         let mut classification = "benign".to_string();
@@ -1238,7 +1450,7 @@ async fn classify_command(
                     pattern_name: m.pattern_name.clone(),
                 },
                 location: CodeLocation {
-                    file_path: Some(file_path.display().to_string()),
+                    file_path: Some(source_file.rel_path.display().to_string()),
                     line_start: m.line_range.0,
                     line_end: m.line_range.1,
                     column_start: m.node_range.0,
@@ -1279,19 +1491,19 @@ async fn classify_command(
     // Generate output
     match format.as_str() {
         "json" => {
-            let output = serde_json::to_string_pretty(&classification_results)?;
-            println!("{}", output);
+            let json_output = serde_json::to_string_pretty(&classification_results)?;
+            output.write_data(&json_output)?;
         }
         "yaml" => {
-            let output = serde_yaml::to_string(&classification_results)?;
-            println!("{}", output);
+            let yaml_output = serde_yaml::to_string(&classification_results)?;
+            output.write_data(&yaml_output)?;
         }
         "markdown" => {
-            print_markdown_report(&classification_results, &[]);
+            print_markdown_report(output, &classification_results, &[])?;
         }
         _ => {
-            println!("Unsupported format '{}', defaulting to table", format);
-            print_table_output(&classification_results);
+            output.warn(&format!("Unsupported format '{}', defaulting to table", format))?;
+            print_table_output(output, &classification_results)?;
         }
     }
     

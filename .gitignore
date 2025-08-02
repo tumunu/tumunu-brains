@@ -59,3 +59,15 @@ cobertura.xml
 
 # Benchmarks
 criterion/
+
+
+Problem: The CLI exhibits several correctness and UX issues
+
+
+    Mixed stdout output: Human-readable banners and progress lines are printed to stdout alongside JSON/YAML output, which corrupts machine-readable streams when piping. Additionally, markdown/table outputs interleave with progress messages.
+   
+
+Proposed solution:
+
+    Separate channels: write all progress/info to stderr, and emit pure JSON/YAML to stdout with no decoration. Add --quiet and --no-banner flags.
+ 
