@@ -1,4 +1,9 @@
+use rustc_version::version;
+
 fn main() {
-    // Tree-sitter language parsers are linked automatically by the crates
     println!("cargo:rerun-if-changed=build.rs");
+    
+    if let Ok(ver) = version() {
+        println!("cargo:rustc-env=RUSTC_VERSION={}", ver);
+    }
 }

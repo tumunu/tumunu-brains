@@ -3,15 +3,48 @@
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::fmt;
+use std::str::FromStr;
 
 /// API version structure with semantic versioning
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ApiVersion {
-    pub major: u32,
-    pub minor: u32,
-    pub patch: u32,
-    pub pre_release: Option<String>,
-    pub build_metadata: Option<String>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApiVersion(pub semver::Version);
+
+mod serde_semver {
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use semver::Version;
+
+    pub fn serialize<S>(version: &Version, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        version.to_string().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Version, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Version::parse(&s).map_err(D::Error::custom)
+    }
+}
+
+impl Serialize for ApiVersion {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serde_semver::serialize(&self.0, serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ApiVersion {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        serde_semver::deserialize(deserializer).map(ApiVersion)
+    }
 }
 
 /// Compatibility check result
@@ -22,7 +55,11 @@ pub struct Compatibility {
     pub recommendation: Option<String>,
 }
 
-/// Version requirement specification
+/// Version requirement specification using semver
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionBounds(pub semver::VersionReq);
+
+/// Version requirement specification (deprecated, use VersionBounds)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VersionRequirement {
     pub operator: VersionOperator,
@@ -44,64 +81,63 @@ pub enum VersionOperator {
 impl ApiVersion {
     /// Current API version
     pub fn current() -> Self {
-        Self {
-            major: 1,
-            minor: 0,
-            patch: 0,
-            pre_release: None,
-            build_metadata: None,
-        }
+        Self(semver::Version::new(1, 0, 0))
     }
     
     /// Create new API version
-    pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self {
-            major,
-            minor,
-            patch,
-            pre_release: None,
-            build_metadata: None,
-        }
+    pub fn new(major: u64, minor: u64, patch: u64) -> Self {
+        Self(semver::Version::new(major, minor, patch))
     }
     
     /// Create version with pre-release
-    pub fn with_pre_release(major: u32, minor: u32, patch: u32, pre_release: String) -> Self {
-        Self {
-            major,
-            minor,
-            patch,
-            pre_release: Some(pre_release),
-            build_metadata: None,
-        }
+    pub fn with_pre_release(major: u64, minor: u64, patch: u64, pre_release: &str) -> Result<Self, semver::Error> {
+        let mut version = semver::Version::new(major, minor, patch);
+        version.pre = semver::Prerelease::new(pre_release)?;
+        Ok(Self(version))
     }
     
-    /// Check if this version is compatible with another version
+    /// Parse version string
+    pub fn parse(version_str: &str) -> Result<Self, semver::Error> {
+        semver::Version::parse(version_str).map(ApiVersion)
+    }
+    
+    /// Access major version
+    pub fn major(&self) -> u64 {
+        self.0.major
+    }
+    
+    /// Access minor version
+    pub fn minor(&self) -> u64 {
+        self.0.minor
+    }
+    
+    /// Access patch version
+    pub fn patch(&self) -> u64 {
+        self.0.patch
+    }
+    
     pub fn is_compatible(&self, other: &ApiVersion) -> bool {
         self.check_compatibility(other).compatible
     }
     
-    /// Check detailed compatibility with another version
     pub fn check_compatibility(&self, other: &ApiVersion) -> Compatibility {
-        // Major version must match for compatibility
-        if self.major != other.major {
+        if self.0.major != other.0.major {
             return Compatibility {
                 compatible: false,
-                reason: format!("Major version mismatch: {} vs {}", self.major, other.major),
-                recommendation: Some(format!("Upgrade to API version {}.x.x", self.major)),
+                reason: format!("Major version mismatch: {} vs {}", self.0.major, other.0.major),
+                recommendation: Some(format!("Upgrade to API version {}.x.x", self.0.major)),
             };
         }
         
-        // Minor version backward compatibility
-        if self.minor < other.minor {
+        if self.0.minor < other.0.minor {
             return Compatibility {
                 compatible: false,
-                reason: format!("Minor version too old: {} vs {}", self.minor, other.minor),
-                recommendation: Some(format!("Upgrade to API version {}.{}.x", self.major, other.minor)),
+                reason: format!("Minor version too old: {} vs {}", self.0.minor, other.0.minor),
+                recommendation: Some(format!("Upgrade to API version {}.{}.x", self.0.major, other.0.minor)),
             };
         }
         
-        // Pre-release versions are less stable
-        if other.pre_release.is_some() && self.pre_release.is_none() {
+        if !other.0.pre.is_empty() && self.0.pre.is_empty() {
             return Compatibility {
                 compatible: true,
                 reason: "Plugin uses pre-release version".to_string(),
@@ -276,45 +312,35 @@ impl fmt::Display for VersionParseError {
 
 impl std::error::Error for VersionParseError {}
 
+impl VersionBounds {
+    pub fn parse(req_str: &str) -> Result<Self, semver::Error> {
+        semver::VersionReq::parse(req_str).map(VersionBounds)
+    }
+    
+    pub fn matches(&self, version: &ApiVersion) -> bool {
+        self.0.matches(&version.0)
+    }
+    
+    pub fn any() -> Self {
+        Self(semver::VersionReq::STAR)
+    }
+}
+
 impl fmt::Display for ApiVersion {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(f, "{}", self.0)
     }
 }
 
 impl PartialOrd for ApiVersion {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        self.0.partial_cmp(&other.0)
     }
 }
 
 impl Ord for ApiVersion {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Compare major version
-        match self.major.cmp(&other.major) {
-            Ordering::Equal => {},
-            other => return other,
-        }
-        
-        // Compare minor version
-        match self.minor.cmp(&other.minor) {
-            Ordering::Equal => {},
-            other => return other,
-        }
-        
-        // Compare patch version
-        match self.patch.cmp(&other.patch) {
-            Ordering::Equal => {},
-            other => return other,
-        }
-        
-        // Compare pre-release (stable > pre-release)
-        match (&self.pre_release, &other.pre_release) {
-            (None, None) => Ordering::Equal,
-            (None, Some(_)) => Ordering::Greater,
-            (Some(_), None) => Ordering::Less,
-            (Some(a), Some(b)) => a.cmp(b),
-        }
+        self.0.cmp(&other.0)
     }
 }
 

@@ -191,6 +191,9 @@ pub trait CodeClassifier {
 
 /// Trait for pattern engines
 pub trait PatternEngine {
+    /// Get unique engine identifier
+    fn id(&self) -> &str;
+
     /// Analyze code for patterns
     fn analyze(&self, code: &str) -> anyhow::Result<Vec<DetectionResult>>;
 
@@ -227,6 +230,7 @@ pub struct TrainingExample {
 
 /// Basic LLM detector implementation
 pub struct BasicLLMDetector {
+    id: String,
     confidence_threshold: f64,
     supported_langs: Vec<String>,
     pattern_signatures: HashMap<String, Vec<String>>,
@@ -235,6 +239,7 @@ pub struct BasicLLMDetector {
 impl BasicLLMDetector {
     pub fn new() -> Self {
         Self {
+            id: "basic_llm_detector".to_string(),
             confidence_threshold: 0.7,
             supported_langs: vec![
                 "rust".to_string(),
@@ -366,6 +371,39 @@ impl LLMDetector for BasicLLMDetector {
 impl Default for BasicLLMDetector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl PatternEngine for BasicLLMDetector {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn analyze(&self, code: &str) -> anyhow::Result<Vec<DetectionResult>> {
+        let detection = self.detect_llm_signatures(code)?;
+        Ok(vec![detection])
+    }
+
+    fn capabilities(&self) -> EngineCapabilities {
+        EngineCapabilities {
+            supported_languages: self.supported_langs.clone(),
+            pattern_types: vec!["llm_detection".to_string()],
+            features: vec!["token_analysis".to_string(), "pattern_matching".to_string()],
+            performance_characteristics: {
+                let mut perf = HashMap::new();
+                perf.insert("accuracy".to_string(), 0.7);
+                perf.insert("speed".to_string(), 0.9);
+                perf
+            },
+        }
+    }
+
+    fn update_patterns(&mut self, _patterns: &[DetectionOntology]) -> anyhow::Result<()> {
+        Ok(())
+    }
+
+    fn performance_metrics(&self) -> PerformanceMetrics {
+        PerformanceMetrics::default()
     }
 }
 

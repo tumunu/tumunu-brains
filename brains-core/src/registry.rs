@@ -1,17 +1,21 @@
 //! Plugin registry for managing detection engines and analysis modules
 
 use crate::plugin::{Plugin, PluginMetadata};
+use brains_detection::PatternEngine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Plugin registry for managing loaded plugins
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct PluginRegistry {
     plugins: HashMap<String, Plugin>,
     plugin_directory: PathBuf,
     metadata_cache: HashMap<String, PluginMetadata>,
+    #[serde(skip)]
+    active_engines: HashMap<String, Arc<dyn PatternEngine + Send + Sync>>,
 }
 
 impl PluginRegistry {
@@ -23,6 +27,7 @@ impl PluginRegistry {
             plugins: HashMap::new(),
             plugin_directory,
             metadata_cache: HashMap::new(),
+            active_engines: HashMap::new(),
         })
     }
     
@@ -80,6 +85,38 @@ impl PluginRegistry {
         self.metadata_cache.values().collect()
     }
     
+    /// Register pattern engine
+    pub fn register_engine(&mut self, engine: Arc<dyn PatternEngine + Send + Sync>) -> anyhow::Result<()> {
+        let id = engine.id().to_string();
+        
+        if self.active_engines.contains_key(&id) {
+            return Err(anyhow::anyhow!("Engine already registered: {}", id));
+        }
+        
+        self.active_engines.insert(id, engine);
+        Ok(())
+    }
+    
+    /// Get pattern engine by ID
+    pub fn get_engine(&self, id: &str) -> Option<Arc<dyn PatternEngine + Send + Sync>> {
+        self.active_engines.get(id).cloned()
+    }
+    
+    /// List all active engine IDs
+    pub fn list_engines(&self) -> Vec<String> {
+        self.active_engines.keys().cloned().collect()
+    }
+    
+    /// Unregister pattern engine
+    pub fn unregister_engine(&mut self, id: &str) -> anyhow::Result<()> {
+        if !self.active_engines.contains_key(id) {
+            return Err(anyhow::anyhow!("Engine not found: {}", id));
+        }
+        
+        self.active_engines.remove(id);
+        Ok(())
+    }
+    
     /// Scan plugin directory for available plugins
     pub fn scan_plugins(&mut self) -> anyhow::Result<Vec<PathBuf>> {
         let mut plugin_paths = Vec::new();
@@ -122,6 +159,17 @@ impl PluginRegistry {
                 .to_string();
             
             Ok(PluginMetadata::default_for_name(plugin_name))
+        }
+    }
+}
+
+impl Clone for PluginRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            plugins: self.plugins.clone(),
+            plugin_directory: self.plugin_directory.clone(),
+            metadata_cache: self.metadata_cache.clone(),
+            active_engines: HashMap::new(),
         }
     }
 }

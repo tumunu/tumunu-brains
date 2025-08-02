@@ -1,15 +1,20 @@
 //! Plugin interface definitions and metadata structures
 
 use crate::versioning::ApiVersion;
+use brains_detection::PatternEngine;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Plugin interface for forensic analysis engines
 pub trait PluginInterface {
     /// Get plugin metadata
     fn metadata(&self) -> &PluginMetadata;
+    
+    /// Build pattern engine for analysis
+    fn build_engine(&self) -> anyhow::Result<Arc<dyn PatternEngine + Send + Sync>>;
     
     /// Initialize plugin with configuration
     fn initialize(&mut self, config: &PluginConfig) -> anyhow::Result<()>;
@@ -370,6 +375,50 @@ pub struct Plugin {
     pub metadata: PluginMetadata,
     pub library_path: PathBuf,
     pub loaded: bool,
+}
+
+impl PluginInterface for Plugin {
+    fn metadata(&self) -> &PluginMetadata {
+        &self.metadata
+    }
+    
+    fn build_engine(&self) -> anyhow::Result<Arc<dyn PatternEngine + Send + Sync>> {
+        let engine = brains_detection::BasicLLMDetector::new();
+        Ok(Arc::new(engine))
+    }
+    
+    fn initialize(&mut self, _config: &PluginConfig) -> anyhow::Result<()> {
+        self.loaded = true;
+        Ok(())
+    }
+    
+    fn analyze(&self, _input: &PluginInput) -> anyhow::Result<PluginOutput> {
+        Err(anyhow::anyhow!("Use build_engine() to get PatternEngine for analysis"))
+    }
+    
+    fn cleanup(&mut self) -> anyhow::Result<()> {
+        self.loaded = false;
+        Ok(())
+    }
+    
+    fn health_check(&self) -> PluginHealth {
+        PluginHealth {
+            status: if self.loaded { HealthStatus::Healthy } else { HealthStatus::Unknown },
+            message: "Plugin status".to_string(),
+            last_check: chrono::Utc::now(),
+            performance_metrics: PluginPerformanceMetrics {
+                execution_time_ms: 0,
+                memory_usage_mb: 0.0,
+                cpu_usage_percent: 0.0,
+                disk_io_mb: 0.0,
+                network_requests: 0,
+                cache_hits: 0,
+                cache_misses: 0,
+            },
+            error_count: 0,
+            warning_count: 0,
+        }
+    }
 }
 
 impl PluginMetadata {

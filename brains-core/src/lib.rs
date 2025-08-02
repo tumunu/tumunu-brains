@@ -15,12 +15,16 @@ pub mod plugin;
 pub mod versioning;
 pub mod governance;
 pub mod fs_scanner;
+pub mod system_metrics;
+pub mod orchestrator;
 
 pub use registry::PluginRegistry;
 pub use plugin::{Plugin, PluginMetadata, PluginInterface};
 pub use versioning::{ApiVersion, Compatibility};
 pub use governance::{PluginGovernance, ApprovalStatus};
 pub use fs_scanner::{ScanOptions, SourceFile, collect_source_files, default_ext_map, parse_ext_map_config, merge_ext_maps};
+pub use system_metrics::{SystemMetrics, MetricsProvider, SysinfoMetricsProvider};
+pub use orchestrator::{EngineOrchestrator, ExecError};
 
 /// Core plugin system for forensic intelligence platform
 #[derive(Serialize, Deserialize)]
@@ -31,6 +35,10 @@ pub struct ForensicCore {
     #[serde(skip)]
     pub active_engines: HashMap<String, Box<dyn PatternEngine>>,
     pub configuration: CoreConfiguration,
+    #[serde(skip)]
+    pub metrics_provider: Option<SysinfoMetricsProvider>,
+    #[serde(skip)]
+    pub orchestrator: Option<EngineOrchestrator>,
 }
 
 impl Clone for ForensicCore {
@@ -39,8 +47,10 @@ impl Clone for ForensicCore {
             version: self.version.clone(),
             plugin_registry: self.plugin_registry.clone(),
             governance: self.governance.clone(),
-            active_engines: HashMap::new(), // Cannot clone trait objects
+            active_engines: HashMap::new(),
             configuration: self.configuration.clone(),
+            metrics_provider: None,
+            orchestrator: None,
         }
     }
 }
@@ -53,6 +63,8 @@ impl std::fmt::Debug for ForensicCore {
             .field("governance", &self.governance)
             .field("active_engines", &format!("{} engines", self.active_engines.len()))
             .field("configuration", &self.configuration)
+            .field("metrics_provider", &self.metrics_provider.is_some())
+            .field("orchestrator", &self.orchestrator.is_some())
             .finish()
     }
 }
@@ -297,31 +309,33 @@ impl ForensicCore {
             governance,
             active_engines: HashMap::new(),
             configuration,
+            metrics_provider: Some(SysinfoMetricsProvider::new()),
+            orchestrator: Some(EngineOrchestrator::new(
+                configuration.max_concurrent_analyses,
+                std::time::Duration::from_secs(configuration.analysis_timeout_seconds)
+            )),
         })
     }
     
-    /// Load plugin from file
     pub fn load_plugin(&mut self, plugin_path: PathBuf) -> anyhow::Result<()> {
         let plugin = self.plugin_registry.load_plugin(plugin_path)?;
         
-        // Check governance approval
         if !self.governance.is_approved(&plugin.metadata.name) {
             return Err(anyhow::anyhow!("Plugin not approved by governance: {}", plugin.metadata.name));
         }
         
-        // Check API compatibility
         if !self.version.is_compatible(&plugin.metadata.api_version) {
             return Err(anyhow::anyhow!("Plugin API version incompatible: {} requires {}", 
                 plugin.metadata.name, plugin.metadata.api_version));
         }
         
-        // Register plugin
+        let engine = plugin.build_engine()?;
+        self.plugin_registry.register_engine(engine)?;
         self.plugin_registry.register_plugin(plugin)?;
         
         Ok(())
     }
     
-    /// Execute analysis request
     pub async fn execute_analysis(&mut self, request: AnalysisRequest) -> anyhow::Result<AnalysisResponse> {
         let start_time = std::time::Instant::now();
         let mut results = Vec::new();
@@ -329,28 +343,41 @@ impl ForensicCore {
         let mut warnings = Vec::new();
         let mut engine_times = HashMap::new();
         
-        // Validate request
         self.validate_request(&request)?;
         
-        // Execute requested engines
+        let orchestrator = self.orchestrator.clone()
+            .ok_or_else(|| anyhow::anyhow!("Orchestrator not initialized"))?;
+        
         for engine_name in &request.requested_engines {
             let engine_start = std::time::Instant::now();
             
-            match self.execute_engine(engine_name, &request).await {
-                Ok(mut engine_results) => {
-                    results.append(&mut engine_results);
+            if let Some(engine) = self.plugin_registry.get_engine(engine_name) {
+                match orchestrator.execute(engine, request.input_data.clone()).await {
+                    Ok(mut engine_results) => {
+                        results.append(&mut engine_results);
+                    }
+                    Err(e) => {
+                        errors.push(AnalysisError {
+                            error_id: Uuid::new_v4(),
+                            error_type: "engine_execution".to_string(),
+                            message: e.to_string(),
+                            engine: Some(engine_name.clone()),
+                            severity: ErrorSeverity::Error,
+                            recoverable: true,
+                            context: HashMap::new(),
+                        });
+                    }
                 }
-                Err(e) => {
-                    errors.push(AnalysisError {
-                        error_id: Uuid::new_v4(),
-                        error_type: "engine_execution".to_string(),
-                        message: e.to_string(),
-                        engine: Some(engine_name.clone()),
-                        severity: ErrorSeverity::Error,
-                        recoverable: true,
-                        context: HashMap::new(),
-                    });
-                }
+            } else {
+                errors.push(AnalysisError {
+                    error_id: Uuid::new_v4(),
+                    error_type: "engine_not_found".to_string(),
+                    message: format!("Engine not found: {}", engine_name),
+                    engine: Some(engine_name.clone()),
+                    severity: ErrorSeverity::Error,
+                    recoverable: false,
+                    context: HashMap::new(),
+                });
             }
             
             engine_times.insert(engine_name.clone(), engine_start.elapsed().as_millis() as u64);
@@ -366,16 +393,25 @@ impl ForensicCore {
             performance_metrics: AnalysisMetrics {
                 total_execution_time_ms: total_time,
                 engine_execution_times: engine_times,
-                memory_usage_mb: Self::get_memory_usage(),
-                cpu_usage_percent: Self::get_cpu_usage(),
-                disk_io_mb: 0.0,
+                memory_usage_mb: if let Some(ref mut provider) = self.metrics_provider {
+                    let metrics = provider.sample();
+                    (metrics.mem_used as f64) / (1024.0 * 1024.0)
+                } else { 0.0 },
+                cpu_usage_percent: if let Some(ref mut provider) = self.metrics_provider {
+                    let metrics = provider.sample();
+                    metrics.cpu_usage as f64
+                } else { 0.0 },
+                disk_io_mb: if let Some(ref mut provider) = self.metrics_provider {
+                    let metrics = provider.sample();
+                    (metrics.disk_read_bytes + metrics.disk_written_bytes) as f64 / (1024.0 * 1024.0)
+                } else { 0.0 },
                 network_requests: 0,
                 cache_hit_rate: 0.0,
             },
             execution_metadata: ExecutionMetadata {
                 platform: std::env::consts::OS.to_string(),
                 architecture: std::env::consts::ARCH.to_string(),
-                rust_version: env!("CARGO_PKG_RUST_VERSION").to_string(),
+                rust_version: option_env!("RUSTC_VERSION").unwrap_or("unknown").to_string(),
                 brains_version: env!("CARGO_PKG_VERSION").to_string(),
                 plugin_versions: self.collect_plugin_versions(),
                 environment_hash: Self::generate_environment_hash(),
@@ -406,9 +442,8 @@ impl ForensicCore {
             return Err(anyhow::anyhow!("Memory limit too high: {}", request.context.resource_limits.max_memory_mb));
         }
         
-        // Check requested engines exist
         for engine_name in &request.requested_engines {
-            if !self.active_engines.contains_key(engine_name) {
+            if self.plugin_registry.get_engine(engine_name).is_none() {
                 return Err(anyhow::anyhow!("Engine not found: {}", engine_name));
             }
         }
@@ -416,131 +451,33 @@ impl ForensicCore {
         Ok(())
     }
     
-    /// Execute specific engine
-    async fn execute_engine(&self, engine_name: &str, request: &AnalysisRequest) -> anyhow::Result<Vec<DetectionResult>> {
-        let engine = self.active_engines.get(engine_name)
-            .ok_or_else(|| anyhow::anyhow!("Engine not found: {}", engine_name))?;
-        
-        // Extract code content from request
-        let code = match &request.input_data {
-            AnalysisInput::SourceCode { content, .. } => content.clone(),
-            AnalysisInput::BinaryData { data, .. } => {
-                // Convert binary to string for analysis
-                String::from_utf8_lossy(data).to_string()
-            }
-            _ => return Err(anyhow::anyhow!("Unsupported input type for engine: {}", engine_name)),
-        };
-        
-        // Execute engine analysis
-        let results = engine.analyze(&code)?;
-        
-        // Filter results by confidence threshold
-        let filtered_results = results.into_iter()
-            .filter(|r| r.confidence >= request.analysis_options.confidence_threshold)
-            .collect();
-        
-        Ok(filtered_results)
-    }
     
     /// Get system status
     pub fn get_system_status(&self) -> SystemStatus {
         SystemStatus {
             version: self.version.clone(),
             loaded_plugins: self.plugin_registry.list_plugins().len(),
-            active_engines: self.active_engines.len(),
+            active_engines: self.plugin_registry.list_engines().len(),
             running_analyses: self.get_running_analyses_count(),
             system_health: SystemHealth::Healthy,
             resource_usage: ResourceUsage {
-                memory_usage_mb: Self::get_memory_usage(),
-                cpu_usage_percent: Self::get_cpu_usage(),
-                disk_usage_mb: Self::get_disk_usage(),
+                memory_usage_mb: if let Some(ref mut provider) = self.metrics_provider {
+                    let metrics = provider.sample();
+                    (metrics.mem_used as f64) / (1024.0 * 1024.0)
+                } else { 0.0 },
+                cpu_usage_percent: if let Some(ref mut provider) = self.metrics_provider {
+                    let metrics = provider.sample();
+                    metrics.cpu_usage as f64
+                } else { 0.0 },
+                disk_usage_mb: if let Some(ref mut provider) = self.metrics_provider {
+                    let metrics = provider.sample();
+                    (metrics.disk_usage_pct as f64 * metrics.mem_total as f64) / (100.0 * 1024.0 * 1024.0)
+                } else { 0.0 },
                 network_connections: 0,
             },
         }
     }
     
-    /// Get current memory usage in MB
-    fn get_memory_usage() -> f64 {
-        use std::process::Command;
-        
-        #[cfg(unix)]
-        {
-            if let Ok(output) = Command::new("ps")
-                .args(["-o", "rss=", "-p", &std::process::id().to_string()])
-                .output()
-            {
-                if let Ok(output_str) = String::from_utf8(output.stdout) {
-                    if let Ok(rss_kb) = output_str.trim().parse::<f64>() {
-                        return rss_kb / 1024.0; // Convert KB to MB
-                    }
-                }
-            }
-        }
-        
-        #[cfg(windows)]
-        {
-            if let Ok(output) = Command::new("tasklist")
-                .args(["/FI", &format!("PID eq {}", std::process::id()), "/FO", "CSV"])
-                .output()
-            {
-                if let Ok(output_str) = String::from_utf8(output.stdout) {
-                    // Parse CSV output for memory usage
-                    for line in output_str.lines().skip(1) {
-                        let fields: Vec<&str> = line.split(',').collect();
-                        if fields.len() >= 5 {
-                            let memory_str = fields[4].trim_matches('"').replace(",", "");
-                            if let Ok(memory_kb) = memory_str.parse::<f64>() {
-                                return memory_kb / 1024.0;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        0.0
-    }
-    
-    /// Get current CPU usage percentage
-    fn get_cpu_usage() -> f64 {
-        use std::process::Command;
-        
-        #[cfg(unix)]
-        {
-            if let Ok(output) = Command::new("ps")
-                .args(["-o", "pcpu=", "-p", &std::process::id().to_string()])
-                .output()
-            {
-                if let Ok(output_str) = String::from_utf8(output.stdout) {
-                    if let Ok(cpu_percent) = output_str.trim().parse::<f64>() {
-                        return cpu_percent;
-                    }
-                }
-            }
-        }
-        
-        #[cfg(windows)]
-        {
-            // Windows CPU usage is more complex to get in real-time
-            // Return approximate value based on system load
-            return 0.0;
-        }
-        
-        0.0
-    }
-    
-    /// Get current disk usage in MB
-    fn get_disk_usage() -> f64 {
-        use std::fs;
-        
-        if let Ok(metadata) = fs::metadata(".") {
-            // This is a simplified approach - real implementation would
-            // track actual disk I/O or workspace usage
-            return 0.0;
-        }
-        
-        0.0
-    }
     
     /// Collect plugin versions
     fn collect_plugin_versions(&self) -> HashMap<String, String> {
@@ -732,5 +669,37 @@ mod tests {
         assert_eq!(status.loaded_plugins, 0);
         assert_eq!(status.active_engines, 0);
         assert!(matches!(status.system_health, SystemHealth::Healthy));
+    }
+
+    #[test]
+    fn test_plugin_engine_registration() {
+        let temp_dir = TempDir::new().unwrap();
+        let config = CoreConfiguration {
+            plugin_directory: temp_dir.path().to_path_buf(),
+            ..Default::default()
+        };
+        
+        let mut core = ForensicCore::new(config).unwrap();
+        
+        core.governance.approve_plugin(
+            "test_plugin".to_string(),
+            "1.0.0".to_string(),
+            vec!["admin".to_string()],
+        ).unwrap();
+        
+        let plugin = Plugin {
+            metadata: PluginMetadata::default_for_name("test_plugin".to_string()),
+            library_path: temp_dir.path().join("test_plugin.so"),
+            loaded: false,
+        };
+        
+        let engine = plugin.build_engine().unwrap();
+        let engine_id = engine.id().to_string();
+        
+        core.plugin_registry.register_engine(engine).unwrap();
+        core.plugin_registry.register_plugin(plugin).unwrap();
+        
+        assert_eq!(core.plugin_registry.list_engines().len(), 1);
+        assert!(core.plugin_registry.get_engine(&engine_id).is_some());
     }
 }
