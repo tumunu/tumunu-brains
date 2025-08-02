@@ -322,10 +322,14 @@ impl ForensicReport {
         // Update hash before signing
         self.update_integrity_hash();
         
-        // Create signature
-        let signature_data = format!("{}{}{}", 
-            self.report_id, 
-            self.integrity_hash, 
+        // Create signature with deterministic preimage aligned to verify_signature():
+        // format!("{}{}{}", report_id, signed_hash, signed_at.timestamp())
+        let signed_at = Utc::now();
+        let signature_data = format!("{}{}{}",
+            self.report_id,
+            self.integrity_hash,
+            signed_at.timestamp()
+        );
             self.updated_at.timestamp()
         );
         
@@ -336,7 +340,7 @@ impl ForensicReport {
             public_key: hex::encode(keypair.verifying_key().to_bytes()),
             signature: hex::encode(signature.to_bytes()),
             signature_algorithm: "Ed25519".to_string(),
-            signed_at: Utc::now(),
+            signed_at,
             signer_role,
             signature_purpose: "Report Validation".to_string(),
             hash_algorithm: "SHA256".to_string(),
